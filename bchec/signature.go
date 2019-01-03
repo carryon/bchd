@@ -77,6 +77,42 @@ func (sig *Signature) Verify(hash []byte, pubKey *PublicKey) bool {
 	return ecdsa.Verify(pubKey.ToECDSA(), hash, sig.R, sig.S)
 }
 
+func (sig *Signature) VerifySchnorr(hash []byte, pubKey *PublicKey) bool {
+	// Signature is invalid if s >= order or r >= p.
+	if sig.S.Cmp(pubKey.Params().N) >= 0 || sig.R.Cmp(pubKey.Params().P) >= 0 {
+		return false
+	}
+
+	// Compute scalar e = Hash(r || compressed(P) || m)
+	eBytes := sha256.Sum256(append(append(sig.R.Bytes(), pubKey.SerializeCompressed()...), hash...))
+	e := new(big.Int).SetBytes(eBytes[:])
+
+	// Reject e == 0 or e >= order.
+	if e.Cmp(big.NewInt(0)) == 0 || e.Cmp(pubKey.Params().N) >= 0 {
+		return false
+	}
+
+	// Compute point R = s * G - e * P.
+	sgx, sgy := pubKey.ScalarBaseMult(sig.S.Bytes())
+	epx, epy := pubKey.ScalarMult(pubKey.X, pubKey.Y, e.Bytes())
+
+	epy = epy.Neg(epy).Mod(epy, pubKey.Params().P)
+	rx, ry := pubKey.Curve.Add(sgx, sgy, epx, epy)
+
+	// TODO: check that R is not the point at infinity
+
+	// Check that R.y is quadratic residue
+	if big.Jacobi(ry, big.NewInt(1)) != 1 {
+		return false
+	}
+
+	// Check R values match
+	if rx.Cmp(sig.R) != 0 {
+		return false
+	}
+	return true
+}
+
 // IsEqual compares this Signature instance to the one passed, returning true
 // if both Signatures are equivalent. A signature is equivalent to another, if
 // they both have the same scalar value for R and S.
@@ -416,6 +452,37 @@ func RecoverCompact(curve *KoblitzCurve, signature,
 	}
 
 	return key, ((signature[0] - 27) & 4) == 4, nil
+}
+
+func signSchnorr(privateKey *PrivateKey, hash, nonce []byte) (*Signature, error) {
+	k := new(big.Int).SetBytes(nonce)
+
+	// Compute point R = k * G
+	rx, ry := privateKey.Curve.ScalarBaseMult(k.Bytes())
+
+	//  Negate nonce if R.y is not a quadratic residue.
+	if big.Jacobi(ry, big.NewInt(1)) != 1 {
+		k = k.Neg(k)
+	}
+
+	// Compute scalar e = Hash(R.x || compressed(P) || m)
+	eBytes := sha256.Sum256(append(append(rx.Bytes(), privateKey.PubKey().SerializeCompressed()...), hash...))
+	e := new(big.Int).SetBytes(eBytes[:])
+
+	// Reject nonce if e == 0 or e >= order.
+	if e.Cmp(big.NewInt(0)) == 0 || e.Cmp(privateKey.Curve.Params().N) > 0 {
+		return nil, errors.New("invalid nonce")
+	}
+
+	// Compute scalar s = (k + e * x) mod P
+	x := new(big.Int).SetBytes(privateKey.Serialize())
+	s := e.Mul(e, x)
+	s.Add(s, k)
+	s.Mod(s, privateKey.Params().N)
+	return &Signature{
+		R: rx,
+		S: s,
+	}, nil
 }
 
 // signRFC6979 generates a deterministic ECDSA signature according to RFC 6979 and BIP 62.

@@ -693,3 +693,24 @@ func TestSignatureIsEqual(t *testing.T) {
 			"equal to %v", sig1, sig2)
 	}
 }
+
+func TestSchnorrSign(t *testing.T) {
+	m := make([]byte, 32)
+	rand.Read(m)
+
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+
+	priv, err := NewPrivateKey(S256())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := signSchnorr(priv, m, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := sig.VerifySchnorr(m, priv.PubKey())
+	if !valid {
+		t.Fatal("Invalid signature")
+	}
+}
