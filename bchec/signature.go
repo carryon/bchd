@@ -94,7 +94,6 @@ func (sig *Signature) VerifySchnorr(hash []byte, pubKey *PublicKey) bool {
 	// Compute scalar e = Hash(r || compressed(P) || m)
 	eBytes := sha256.Sum256(append(append(sig.R.Bytes(), pubKey.SerializeCompressed()...), hash...))
 	e := new(big.Int).SetBytes(eBytes[:])
-	e.Mod(e, curve.Params().N)
 
 	// Reject e == 0 or e >= order.
 	if e.Cmp(big.NewInt(0)) == 0 || e.Cmp(curve.Params().N) >= 0 {
@@ -102,7 +101,7 @@ func (sig *Signature) VerifySchnorr(hash []byte, pubKey *PublicKey) bool {
 	}
 
 	// Compute point R = s * G - e * P.
-	// Negating e is slight faster than negating eP.y
+	// Negating e is slighty faster than negating eP.y
 	e.Neg(e)
 	e.Mod(e, curve.N)
 
