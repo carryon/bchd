@@ -101,7 +101,7 @@ func (sig *Signature) VerifySchnorr(hash []byte, pubKey *PublicKey) bool {
 	}
 
 	// Compute point R = s * G - e * P.
-	// Negating e is slighty faster than negating eP.y
+	// Negating e is slightly faster than negating eP.y
 	e.Neg(e)
 	e.Mod(e, curve.N)
 
