@@ -86,29 +86,64 @@ func (sig *Signature) VerifySchnorr(hash []byte, pubKey *PublicKey) bool {
 	// Compute scalar e = Hash(r || compressed(P) || m)
 	eBytes := sha256.Sum256(append(append(sig.R.Bytes(), pubKey.SerializeCompressed()...), hash...))
 	e := new(big.Int).SetBytes(eBytes[:])
+	e.Mod(e, pubKey.Params().N)
 
 	// Reject e == 0 or e >= order.
 	if e.Cmp(big.NewInt(0)) == 0 || e.Cmp(pubKey.Params().N) >= 0 {
 		return false
 	}
 
-	// Compute point R = s * G - e * P.
-	sgx, sgy := pubKey.ScalarBaseMult(sig.S.Bytes())
-	epx, epy := pubKey.ScalarMult(pubKey.X, pubKey.Y, e.Bytes())
+	// If the curve isn't a KoblitzCurve we have to use the interface which
+	// is potentially slower as we don't have access to Jacobian conversions.
+	// If it is the KoblitizCurve then we can get a nice little speed up by using
+	// Jacobian coordinates.
+	curve, ok := pubKey.Curve.(*KoblitzCurve)
+	if !ok {
+		// Compute point R = s * G - e * P.
+		sgx, sgy := pubKey.ScalarBaseMult(sig.S.Bytes())
+		epx, epy := pubKey.ScalarMult(pubKey.X, pubKey.Y, e.Bytes())
+		epy = epy.Neg(epy).Mod(epy, pubKey.Params().P)
+		rx, ry := pubKey.Curve.Add(sgx, sgy, epx, epy)
 
-	epy = epy.Neg(epy).Mod(epy, pubKey.Params().P)
-	rx, ry := pubKey.Curve.Add(sgx, sgy, epx, epy)
+		// Check that R is not infinity
+		if rx.Sign() == 0 || ry.Sign() == 0 {
+			return false
+		}
 
-	// TODO: check that R is not the point at infinity
+		// Check that R.y is quadratic residue
+		if big.Jacobi(ry, pubKey.Params().P) != 1 {
+			return false
+		}
 
-	// Check that R.y is quadratic residue
-	if big.Jacobi(ry, big.NewInt(1)) != 1 {
-		return false
-	}
+		// Check R values match
+		if rx.Cmp(sig.R) != 0 {
+			return false
+		}
+	} else {
+		// Compute point R = s * G - e * P.
+		sgx, sgy, sgz := curve.scalarBaseMultJacobian(sig.S.Bytes())
+		epx, epy, epz := curve.scalarMultJacobian(pubKey.X, pubKey.Y, e.Bytes())
+		epy = epy.Negate(1)
+		rx, ry, rz := new(fieldVal), new(fieldVal), new(fieldVal)
+		curve.addJacobian(sgx, sgy, sgz, epx, epy, epz, rx, ry, rz)
 
-	// Check R values match
-	if rx.Cmp(sig.R) != 0 {
-		return false
+		// Check that R is not infinity
+		if rz.Equals(new(fieldVal).SetInt(0)) {
+			return false
+		}
+
+		// Check that R.y is quadratic residue
+		yz := ry.Mul(rz).Normalize()
+		b := yz.Bytes()
+		if big.Jacobi(new(big.Int).SetBytes(b[:]), curve.P) != 1 {
+			return false
+		}
+
+		// Check R values match
+		fieldR := new(fieldVal).SetByteSlice(sig.R.Bytes())
+		if !rx.Equals(rz.Mul(rz).Mul(fieldR)) {
+			return false
+		}
 	}
 	return true
 }
@@ -454,14 +489,13 @@ func RecoverCompact(curve *KoblitzCurve, signature,
 	return key, ((signature[0] - 27) & 4) == 4, nil
 }
 
-func signSchnorr(privateKey *PrivateKey, hash, nonce []byte) (*Signature, error) {
-	k := new(big.Int).SetBytes(nonce)
-
+func signSchnorr(privateKey *PrivateKey, hash []byte) (*Signature, error) {
+	k := nonceRFC6979(privateKey.D, hash)
 	// Compute point R = k * G
 	rx, ry := privateKey.Curve.ScalarBaseMult(k.Bytes())
 
 	//  Negate nonce if R.y is not a quadratic residue.
-	if big.Jacobi(ry, big.NewInt(1)) != 1 {
+	if big.Jacobi(ry, privateKey.Params().P) != 1 {
 		k = k.Neg(k)
 	}
 
