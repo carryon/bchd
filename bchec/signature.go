@@ -85,6 +85,7 @@ func (sig *Signature) VerifySchnorr(hash []byte, pubKey *PublicKey) bool {
 	if !ok {
 		return false
 	}
+
 	// Signature is invalid if s >= order or r >= p.
 	if sig.S.Cmp(curve.Params().N) >= 0 || sig.R.Cmp(curve.Params().P) >= 0 {
 		return false
@@ -101,9 +102,12 @@ func (sig *Signature) VerifySchnorr(hash []byte, pubKey *PublicKey) bool {
 	}
 
 	// Compute point R = s * G - e * P.
+	// Negating e is slight faster than negating eP.y
+	e.Neg(e)
+	e.Mod(e, curve.N)
+
 	sgx, sgy, sgz := curve.scalarBaseMultJacobian(sig.S.Bytes())
 	epx, epy, epz := curve.scalarMultJacobian(pubKey.X, pubKey.Y, e.Bytes())
-	epy = epy.Negate(1)
 	rx, ry, rz := new(fieldVal), new(fieldVal), new(fieldVal)
 	curve.addJacobian(sgx, sgy, sgz, epx, epy, epz, rx, ry, rz)
 
