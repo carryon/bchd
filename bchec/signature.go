@@ -78,72 +78,51 @@ func (sig *Signature) Verify(hash []byte, pubKey *PublicKey) bool {
 }
 
 func (sig *Signature) VerifySchnorr(hash []byte, pubKey *PublicKey) bool {
+
+	// This schnorr specification is specific to the secp256k1 curve so if the
+	// provided curve is not a KoblitizCurve then we'll just return false.
+	curve, ok := pubKey.Curve.(*KoblitzCurve)
+	if !ok {
+		return false
+	}
 	// Signature is invalid if s >= order or r >= p.
-	if sig.S.Cmp(pubKey.Params().N) >= 0 || sig.R.Cmp(pubKey.Params().P) >= 0 {
+	if sig.S.Cmp(curve.Params().N) >= 0 || sig.R.Cmp(curve.Params().P) >= 0 {
 		return false
 	}
 
 	// Compute scalar e = Hash(r || compressed(P) || m)
 	eBytes := sha256.Sum256(append(append(sig.R.Bytes(), pubKey.SerializeCompressed()...), hash...))
 	e := new(big.Int).SetBytes(eBytes[:])
-	e.Mod(e, pubKey.Params().N)
+	e.Mod(e, curve.Params().N)
 
 	// Reject e == 0 or e >= order.
-	if e.Cmp(big.NewInt(0)) == 0 || e.Cmp(pubKey.Params().N) >= 0 {
+	if e.Cmp(big.NewInt(0)) == 0 || e.Cmp(curve.Params().N) >= 0 {
 		return false
 	}
 
-	// If the curve isn't a KoblitzCurve we have to use the interface which
-	// is potentially slower as we don't have access to Jacobian conversions.
-	// If it is the KoblitizCurve then we can get a nice little speed up by using
-	// Jacobian coordinates.
-	curve, ok := pubKey.Curve.(*KoblitzCurve)
-	if !ok {
-		// Compute point R = s * G - e * P.
-		sgx, sgy := pubKey.ScalarBaseMult(sig.S.Bytes())
-		epx, epy := pubKey.ScalarMult(pubKey.X, pubKey.Y, e.Bytes())
-		epy = epy.Neg(epy).Mod(epy, pubKey.Params().P)
-		rx, ry := pubKey.Curve.Add(sgx, sgy, epx, epy)
+	// Compute point R = s * G - e * P.
+	sgx, sgy, sgz := curve.scalarBaseMultJacobian(sig.S.Bytes())
+	epx, epy, epz := curve.scalarMultJacobian(pubKey.X, pubKey.Y, e.Bytes())
+	epy = epy.Negate(1)
+	rx, ry, rz := new(fieldVal), new(fieldVal), new(fieldVal)
+	curve.addJacobian(sgx, sgy, sgz, epx, epy, epz, rx, ry, rz)
 
-		// Check that R is not infinity
-		if rx.Sign() == 0 || ry.Sign() == 0 {
-			return false
-		}
+	// Check that R is not infinity
+	if rz.Equals(new(fieldVal).SetInt(0)) {
+		return false
+	}
 
-		// Check that R.y is quadratic residue
-		if big.Jacobi(ry, pubKey.Params().P) != 1 {
-			return false
-		}
+	// Check that R.y is quadratic residue
+	yz := ry.Mul(rz).Normalize()
+	b := yz.Bytes()
+	if big.Jacobi(new(big.Int).SetBytes(b[:]), curve.P) != 1 {
+		return false
+	}
 
-		// Check R values match
-		if rx.Cmp(sig.R) != 0 {
-			return false
-		}
-	} else {
-		// Compute point R = s * G - e * P.
-		sgx, sgy, sgz := curve.scalarBaseMultJacobian(sig.S.Bytes())
-		epx, epy, epz := curve.scalarMultJacobian(pubKey.X, pubKey.Y, e.Bytes())
-		epy = epy.Negate(1)
-		rx, ry, rz := new(fieldVal), new(fieldVal), new(fieldVal)
-		curve.addJacobian(sgx, sgy, sgz, epx, epy, epz, rx, ry, rz)
-
-		// Check that R is not infinity
-		if rz.Equals(new(fieldVal).SetInt(0)) {
-			return false
-		}
-
-		// Check that R.y is quadratic residue
-		yz := ry.Mul(rz).Normalize()
-		b := yz.Bytes()
-		if big.Jacobi(new(big.Int).SetBytes(b[:]), curve.P) != 1 {
-			return false
-		}
-
-		// Check R values match
-		fieldR := new(fieldVal).SetByteSlice(sig.R.Bytes())
-		if !rx.Equals(rz.Mul(rz).Mul(fieldR)) {
-			return false
-		}
+	// Check R values match
+	fieldR := new(fieldVal).SetByteSlice(sig.R.Bytes())
+	if !rx.Equals(rz.Mul(rz).Mul(fieldR)) {
+		return false
 	}
 	return true
 }
@@ -508,7 +487,7 @@ func signSchnorr(privateKey *PrivateKey, hash []byte) (*Signature, error) {
 		return nil, errors.New("invalid nonce")
 	}
 
-	// Compute scalar s = (k + e * x) mod P
+	// Compute scalar s = (k + e * x) mod N
 	x := new(big.Int).SetBytes(privateKey.Serialize())
 	s := e.Mul(e, x)
 	s.Add(s, k)
